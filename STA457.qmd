@@ -1,0 +1,341 @@
+---
+title: "cocoa"
+format: pdf
+editor: visual
+---
+
+```{r}
+# install.packages("ggplot2")
+# install.packages("dplyr")
+# install.packages("lubridate")
+# install.packages("zoo")
+# install.packages("forecast")
+# install.packages("tseries")
+# install.packages("scales")
+# install.packages("prophet")
+```
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(lubridate)
+library(zoo)
+library(forecast)
+library(tseries)
+library(scales)
+library(tidyr)
+library(prophet)
+```
+
+```{r}
+price_data <- read.csv("Daily Prices.csv")
+
+fx_data <- read.csv("Interbank FX Rates Historical.csv")
+
+ghana_data <- read.csv("Gahna.csv", skip = 14)
+```
+
+```{r}
+# ---------- 处理 cocoa price ----------
+price_data$Date <- dmy(price_data$Date)  # 转换日期格式
+price_data$YEAR <- year(price_data$Date)
+price_data$DOY <- yday(price_data$Date)
+
+colnames(price_data)[2:3] <- c("Price_London", "Price_NY")
+# ---------- 处理汇率数据 ----------
+fx_data$Date <- dmy(fx_data$Date)
+fx_data$YEAR <- year(fx_data$Date)
+fx_data$DOY <- yday(fx_data$Date)
+```
+
+```{r}
+merged_data <- full_join(price_data, fx_data, by = c("YEAR", "DOY")) %>%
+               full_join(ghana_data, by = c("YEAR", "DOY")) %>%
+               arrange(YEAR, DOY)
+```
+
+```{r}
+merged_data$Date <- as.Date(paste0(merged_data$YEAR, "-", merged_data$DOY), format = "%Y-%j")
+
+cocoa_data <- merged_data[merged_data$Date >= as.Date("2007-07-09"), ]
+
+cocoa_data <- cocoa_data %>%
+  select(-Date.x, -Date.y, -Currency, -Currency.Pair, -Buying, -Selling,
+         -ICCO.daily.price..US..tonne., -ICCO.daily.price..Euro.tonne., -Price_London)
+
+cocoa_data <- cocoa_data %>%
+  select(Date, YEAR, DOY, everything())
+
+cocoa_data <- cocoa_data %>%
+  mutate(
+    T2M = ifelse(T2M < 0, NA, T2M),
+    T2M_MAX = ifelse(T2M_MAX < 0, NA, T2M_MAX),
+    T2M_MIN = ifelse(T2M_MIN < 0, NA, T2M_MIN),
+    PRECTOTCORR = ifelse(PRECTOTCORR < 0, NA, PRECTOTCORR)
+  )
+
+cocoa_data$Price_NY <- as.numeric(gsub(",", "", cocoa_data$Price_NY))
+cocoa_data$Mid.Rate <- as.numeric(gsub(",", "", cocoa_data$Mid.Rate))
+
+cocoa_data$Mid.Rate[cocoa_data$Mid.Rate == 0 | cocoa_data$Mid.Rate > 1000] <- NA
+
+cocoa_data$ALLSKY_SFC_SW_DWN[cocoa_data$ALLSKY_SFC_SW_DWN <= 0] <- NA
+
+cocoa_data <- cocoa_data %>%
+  fill(everything(), .direction = "down")
+
+cocoa_data <- cocoa_data %>%
+  mutate(logprice = log(Price_NY))
+```
+
+```{r}
+ggplot(cocoa_data, aes(x = Date)) +
+  geom_line(aes(y = Price_NY), color = "#1f77b4", size = 0.7) +
+  geom_line(aes(y = Mid.Rate * 500), color = "#d62728", size = 0.7, linetype = "dashed") +
+  scale_y_continuous(
+    name = "Cocoa Price (USD/tonne)",
+    sec.axis = sec_axis(~./500, name = "USD/GHS Exchange Rate")
+  ) +
+  labs(
+    title = "Cocoa Price and USD/GHS Exchange Rate Over Time",
+    x = "Date"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    axis.title.y.left = element_text(color = "#1f77b4", face = "bold"),
+    axis.title.y.right = element_text(color = "#d62728", face = "bold"),
+    axis.text = element_text(color = "black"),
+    panel.grid.minor = element_blank()
+  )
+
+ggplot(cocoa_data, aes(x = Date)) +
+  geom_line(aes(y = Price_NY), color = "#1f77b4", size = 0.7) +
+  scale_y_continuous(
+    name = "Cocoa Price (USD/tonne)"
+  ) +
+  labs(
+    title = "Cocoa Price Over Time",
+    x = "Date"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    axis.title.y = element_text(color = "black", face = "bold"),
+    axis.text = element_text(color = "black"),
+    panel.grid.minor = element_blank()
+  )
+
+ggplot(cocoa_data, aes(x = Date)) +
+  geom_line(aes(y = logprice), color = "#ff7f0e", size = 0.7) +
+  scale_y_continuous(
+    name = "Log of Cocoa Price (log USD/tonne)"
+  ) +
+  labs(
+    title = "Log of Cocoa Price Over Time",
+    x = "Date"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    axis.title.y = element_text(color = "black", face = "bold"),
+    axis.text = element_text(color = "black"),
+    panel.grid.minor = element_blank()
+  )
+```
+
+```{r}
+
+acf(cocoa_data$logprice, 
+    main = "ACF of log(price)", 
+    na.action = na.pass)
+
+pacf(cocoa_data$logprice, 
+     main = "PACF of log(price)", 
+     na.action = na.pass)
+
+diff_logprice <- diff(cocoa_data$logprice)
+
+plot(diff_logprice, type = "l", 
+     main = "First difference of log(price)", 
+     xlab = "Time", ylab = "Differenced value", 
+     na.action = na.pass)
+
+acf(diff_logprice, 
+    main = "ACF of first difference log(price)", 
+    na.action = na.pass)
+
+pacf(diff_logprice, 
+     main = "PACF of first difference log(price)", 
+     na.action = na.pass)
+```
+
+```{r}
+adf_result <- adf.test(diff_logprice, alternative = "stationary")
+print(adf_result)
+box_test_result <- Box.test(diff_logprice, lag = 20, type = "Ljung-Box")
+print(box_test_result)
+```
+
+```{r}
+# Step 1: 清洗数据并确保顺序
+cocoa_data <- cocoa_data %>%
+  filter(!is.na(logprice)) %>%
+  arrange(Date)
+
+# Step 2: 拆分训练/测试数据（基于数据框而非ts）
+n <- nrow(cocoa_data)
+train_size <- floor(0.94 * n)
+test_size <- n - train_size
+
+train_data <- cocoa_data[1:train_size, ]
+test_data <- cocoa_data[(train_size + 1):n, ]
+
+# Step 3: 构建 ts 对象（只用 Price_NY 值）
+train_ts <- ts(train_data$logprice, frequency = 365)
+```
+
+```{r}
+fit_arim <- auto.arima(train_ts)
+fit_arim
+arima<- auto.arima(train_ts, trace = T)
+```
+
+```{r}
+fit_arima1 <- arima(train_ts, order = c(1, 1, 0))
+summary(fit_arima1)
+
+forecast_fit <- forecast(fit_arima1, h = test_size)
+
+forecast_fit_orig <- forecast_fit
+forecast_fit_orig$mean  <- exp(forecast_fit$mean)
+forecast_fit_orig$lower <- exp(forecast_fit$lower)
+forecast_fit_orig$upper <- exp(forecast_fit$upper)
+
+forecast_df <- data.frame(
+  Date = test_data$Date,
+  Forecast = as.numeric(forecast_fit_orig$mean),
+  Lower = as.numeric(forecast_fit_orig$lower[,2]),  
+  Upper = as.numeric(forecast_fit_orig$upper[,2])  
+)
+
+ggplot() +
+  geom_line(data = cocoa_data, aes(x = Date, y = Price_NY), color = "black") +
+  geom_line(data = forecast_df, aes(x = Date, y = Forecast), color = "blue") +
+  geom_ribbon(data = forecast_df, aes(x = Date, ymin = Lower, ymax = Upper), alpha = 0.2, fill = "blue") +
+  labs(title = "Cocoa Price Forecast",
+       x = "Date",
+       y = "Cocoa Price (USD/tonne)") +
+  theme_minimal()
+
+
+par(mfrow = c(2, 2))
+
+plot(residuals(fit_arima1), main = "Residual Time Series", 
+     ylab = "Residuals", xlab = "Time")
+
+acf(residuals(fit_arima1), main = "ACF of Residuals")
+
+qqnorm(residuals(fit_arima1), main = "QQ Plot of Residuals")
+qqline(residuals(fit_arima1))
+
+hist(residuals(fit_arima1), main = "Histogram of Residuals", 
+     xlab = "Residuals", col = "lightblue", border = "white")
+
+# Reset the plotting layout
+par(mfrow = c(1, 1))
+
+```
+
+```{r}
+seasonal_model <- Arima(train_ts, order = c(1,1,0), 
+                          seasonal = list(order = c(0,1,1), period = 330))
+summary(seasonal_model)
+
+forecast_seasonal <- forecast(seasonal_model, h = test_size)
+
+forecast_seasonal_orig <- forecast_seasonal
+forecast_seasonal_orig$mean  <- exp(forecast_seasonal$mean)
+forecast_seasonal_orig$lower <- exp(forecast_seasonal$lower)
+forecast_seasonal_orig$upper <- exp(forecast_seasonal$upper)
+
+forecast_df <- data.frame(
+  Date = test_data$Date,
+  Forecast = as.numeric(exp(forecast_seasonal$mean)),
+  Lower = as.numeric(exp(forecast_seasonal$lower[,2])),  # 95% lower bound
+  Upper = as.numeric(exp(forecast_seasonal$upper[,2]))   # 95% upper bound
+)
+
+ggplot() +
+  geom_line(data = cocoa_data, aes(x = Date, y = Price_NY), color = "black") +
+  geom_line(data = forecast_df, aes(x = Date, y = Forecast), color = "blue") +
+  geom_ribbon(data = forecast_df, aes(x = Date, ymin = Lower, ymax = Upper), alpha = 0.2, fill = "blue") +
+  labs(title = "Seasonal ARIMA Forecast on Original Scale",
+       x = "Date", y = "Cocoa Price (USD/tonne)") +
+  theme_minimal()
+
+par(mfrow = c(2, 2))
+
+
+plot(residuals(seasonal_model), main = "Residuals Time Series", 
+     ylab = "Residuals", xlab = "Time")
+
+acf(residuals(seasonal_model), main = "ACF of Residuals")
+
+qqnorm(residuals(seasonal_model), main = "QQ Plot of Residuals")
+qqline(residuals(seasonal_model))
+
+hist(residuals(seasonal_model), main = "Histogram of Residuals", 
+     xlab = "Residuals", col = "lightblue", border = "white")
+
+par(mfrow = c(1, 1))
+```
+
+```{r}
+df_prophet <- cocoa_data %>%
+  select(ds = Date, y = Price_NY) %>%
+  filter(!is.na(y)) %>%
+  arrange(ds)
+
+n <- nrow(df_prophet)
+train_size <- floor(0.94 * n)
+test_size <- n - train_size
+
+train_df <- df_prophet[1:train_size, ]
+test_df  <- df_prophet[(train_size + 1):n, ]
+
+m <- prophet(train_df,
+  growth = "linear",             
+  changepoint.prior.scale = 0.15, 
+  n.changepoints = 24,
+  seasonality.mode = "additive",
+  yearly.seasonality = TRUE,    
+  weekly.seasonality = FALSE,     
+  daily.seasonality = FALSE     
+)
+```
+
+```{r}
+future <- make_future_dataframe(m, periods = test_size)
+
+forecast <- predict(m, future)
+
+forecast_plot <- forecast %>%
+  select(ds, yhat, yhat_lower, yhat_upper) %>%
+  left_join(df_prophet, by = "ds") %>%
+  mutate(Type = ifelse(row_number() <= train_size, "Train", "Test"))
+
+ggplot(forecast_plot, aes(x = ds)) +
+  geom_line(aes(y = y, color = Type), size = 0.7) +
+  geom_line(aes(y = yhat), color = "blue", linetype = "dashed", size = 0.8) +
+  geom_ribbon(aes(ymin = yhat_lower, ymax = yhat_upper), fill = "lightblue", alpha = 0.3) +
+  labs(title = "Prophet Forecast of Cocoa Prices",
+       x = "Date", y = "Price (USD/tonne)",
+       color = "Data Type") +
+  scale_color_manual(values = c("Train" = "black", "Test" = "red")) +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    legend.position = "top"
+  )
+```
